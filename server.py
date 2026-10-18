@@ -8,18 +8,29 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 EMAIL = "24f3002311@ds.study.iitm.ac.in"
 
-# Associate each JSON-RPC request ID with its HTTP challenge.
+# Store each challenge against its JSON-RPC request ID.
 challenges = {}
 
-mcp = FastMCP("Exam Challenge Server")
+# Configure the server for deployment behind Render's HTTPS proxy.
+mcp = FastMCP(
+    "Exam Challenge Server",
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=False,
+    ),
+)
 
 
 class HeaderCaptureMiddleware:
+    """Capture X-Exam-Challenge from incoming MCP tool-call requests."""
+
     def __init__(self, app: ASGIApp):
         self.app = app
 
     async def __call__(
-        self, scope: Scope, receive: Receive, send: Send
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
     ):
         if scope["type"] != "http" or scope.get("method") != "POST":
             await self.app(scope, receive, send)
@@ -30,26 +41,36 @@ class HeaderCaptureMiddleware:
             for key, value in scope.get("headers", [])
         }
 
-        # Buffer the incoming body so we can inspect the JSON-RPC ID.
-        body = b""
-        more_body = True
+        # Buffer the body to identify the JSON-RPC request ID.
+        body = bytearray()
 
-        while more_body:
+        while True:
             message = await receive()
+
             if message["type"] == "http.disconnect":
                 return
-            body += message.get("body", b"")
-            more_body = message.get("more_body", False)
+
+            body.extend(message.get("body", b""))
+
+            if not message.get("more_body", False):
+                break
+
+        request_body = bytes(body)
 
         try:
-            data = json.loads(body)
+            data = json.loads(request_body)
+
             if (
-                data.get("method") == "tools/call"
-                and headers.get("x-exam-challenge")
+                isinstance(data, dict)
+                and data.get("method") == "tools/call"
                 and "id" in data
             ):
-                challenges[str(data["id"])] = headers["x-exam-challenge"]
-        except (ValueError, AttributeError, TypeError):
+                challenge = headers.get("x-exam-challenge")
+
+                if challenge:
+                    challenges[str(data["id"])] = challenge
+
+        except (ValueError, TypeError):
             pass
 
         # Replay the body for the MCP application.
@@ -57,13 +78,15 @@ class HeaderCaptureMiddleware:
 
         async def replay_receive():
             nonlocal sent
+
             if not sent:
                 sent = True
                 return {
                     "type": "http.request",
-                    "body": body,
+                    "body": request_body,
                     "more_body": False,
                 }
+
             return await receive()
 
         await self.app(scope, replay_receive, send)
@@ -71,25 +94,26 @@ class HeaderCaptureMiddleware:
 
 @mcp.tool()
 def solve_challenge(ctx: Context) -> str:
-    """Hash the challenge from the current HTTP tool-call headers."""
+    """Return the first 16 lowercase hex characters of the required SHA-256."""
 
     challenge = challenges.pop(str(ctx.request_id), None)
 
     if not challenge:
-        raise ValueError("Challenge header missing for this tool call")
+        raise ValueError("Missing X-Exam-Challenge header")
 
-    message = f"{challenge}:{EMAIL}"
-    return hashlib.sha256(message.encode("utf-8")).hexdigest()[:16]
+    message = f"{challenge}:{EMAIL.strip().lower()}"
+
+    return hashlib.sha256(
+        message.encode("utf-8")
+    ).hexdigest()[:16]
 
 
 if __name__ == "__main__":
     import uvicorn
 
     app = HeaderCaptureMiddleware(
-    mcp.streamable_http_app(
-        host="mcp-challenge-ktm5.onrender.com"
+        mcp.streamable_http_app()
     )
-)
 
     uvicorn.run(
         app,
