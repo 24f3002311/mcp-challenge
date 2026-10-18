@@ -84,15 +84,10 @@ def solve_challenge(ctx: Context) -> str:
 
 if __name__ == "__main__":
     import uvicorn
-    
+
     app = HeaderCaptureMiddleware(
     mcp.streamable_http_app(
-        transport_security=TransportSecuritySettings(
-            allowed_hosts=[
-                "mcp-challenge-ktm5.onrender.com",
-                "mcp-challenge-ktm5.onrender.com:*",
-            ],
-        )
+        host="mcp-challenge-ktm5.onrender.com"
     )
 )
 
